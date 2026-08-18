@@ -26,16 +26,24 @@ export interface Config {
     scale?: number;
     /** 默认是否渲染 PNG，默认 true。 */
     render?: boolean;
+    /** browser-harness CLI 路径（WS 模式用），默认 ~/.local/bin/browser-harness。 */
+    browserHarnessPath?: string;
+    /** WS 模式等待 Figma 初始同步的秒数，默认 18。 */
+    wsWaitSeconds?: number;
 }
 export declare const Config: z<Schemastery.ObjectS<{
     token: z<string, string>;
     outputDir: z<string, string>;
     scale: z<number, number>;
     render: z<boolean, boolean>;
+    browserHarnessPath: z<string, string>;
+    wsWaitSeconds: z<number, number>;
 }>, Schemastery.ObjectT<{
     token: z<string, string>;
     outputDir: z<string, string>;
     scale: z<number, number>;
     render: z<boolean, boolean>;
+    browserHarnessPath: z<string, string>;
+    wsWaitSeconds: z<number, number>;
 }>>;
 export declare function apply(ctx: Context, config?: Config): void;
