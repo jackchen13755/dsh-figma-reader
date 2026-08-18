@@ -6,7 +6,7 @@
 ## 功能
 
 - 输入 Figma URL（含 `node-id`）或 `file_key + node_id`
-- 调用 Figma REST API（`/v1/files/{key}/nodes`）拉取节点完整结构
+- 调用 Figma REST API（`/v1/files/{key}`）拉取整份文件，**本地缓存后任意节点零 API 读取**
 - 自动生成结构化 Markdown 报告（图层树 / 文本 / 输入框 / 按钮与组件实例）
 - 可选渲染节点 PNG（`/v1/images/{key}`）
 - 凭据：工具参数 `token`、插件配置 `token` 或环境变量 `FIGMA_TOKEN` 三选一
@@ -73,8 +73,19 @@ figma_read_node file_key=Zh9LpkjKgNrwuBITsD5d6g node_id=8049:4704 render=true sc
 | `render` | 否 | 是否渲染 PNG，默认 true |
 | `scale` | 否 | PNG 缩放倍数，默认 2 |
 | `output_dir` | 否 | 导出目录，默认 `~/Desktop/figma-exports` |
+| `refresh` | 否 | 强制重新拉整文件并刷新缓存，默认 false |
 
 输出：节点 JSON、`*.report.md`、`*.png` 三个文件路径 + 报告摘要。
+
+## 整文件缓存（省 API 配额）
+
+默认开启：首次读取某个文件时，用 `GET /v1/files/{key}` 拉一次**整份文件**，缓存到
+`<output_dir>/figma_cache/<fileKey>.json`；之后读同一文件的任何节点都直接走本地缓存，
+不再调用 REST API。
+
+- 只有 `render=true`（渲染 PNG）或 `refresh=true` 时才会产生新请求；
+- 缓存里找不到节点时会自动强制刷新一次再查找；
+- 整文件缓存可能较大（几十 MB），属正常；删掉 `figma_cache/<fileKey>.json` 即清除缓存。
 
 ## 环境变量
 
