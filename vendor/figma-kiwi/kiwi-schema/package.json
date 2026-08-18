@@ -1,0 +1,7 @@
+{
+  "name": "kiwi-schema",
+  "version": "0.5.0",
+  "description": "Kiwi schema runtime (built from evanw/kiwi, vendored for figma-decoder)",
+  "main": "./kiwi.js",
+  "license": "MIT"
+}
