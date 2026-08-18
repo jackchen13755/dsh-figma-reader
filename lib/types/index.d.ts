@@ -2,9 +2,13 @@
  * @deepseek-ai/dsh-tool-figma-reader — 读取 Figma 设计稿节点。
  *
  * 把一个 Figma 设计稿节点（FRAME/组件）拉成三层产物：
- * 1. 节点原始 JSON（REST API `GET /v1/files/{key}/nodes`）
+ * 1. 节点原始 JSON（来自整文件缓存，避免反复消耗 REST 配额）
  * 2. 结构化 Markdown 报告（图层树、文本、字体、颜色、布局、按钮/输入框）
  * 3. 渲染 PNG（`GET /v1/images/{key}`，可选）
+ *
+ * 配额友好：默认首次读取某文件时用 `GET /v1/files/{key}` 拉整份文件并缓存到
+ * `<outputDir>/figma_cache/<fileKey>.json`；之后读取同文件的任何节点都直接走本地
+ * 缓存，不再调用 API。只有渲染 PNG 或 `refresh=true` 时才会产生新请求。
  *
  * 设计稿节点由 Figma REST API 读取，无需浏览器；凭据用 Personal Access Token
  * （配置项 token，或环境变量 FIGMA_TOKEN）。
