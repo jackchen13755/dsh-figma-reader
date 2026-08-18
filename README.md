@@ -7,8 +7,10 @@
 
 - 输入 Figma URL（含 `node-id`）或 `file_key + node_id`
 - 调用 Figma REST API（`/v1/files/{key}`）拉取整份文件，**本地缓存后任意节点零 API 读取**
+- **WS 模式（`figma_read_node_ws`）**：完全不调 REST API，通过浏览器会话捕获 Figma 的
+  Kiwi 二进制帧并本地解码，输出等价的结构化报告
 - 自动生成结构化 Markdown 报告（图层树 / 文本 / 输入框 / 按钮与组件实例）
-- 可选渲染节点 PNG（`/v1/images/{key}`）
+- 可选渲染节点 PNG（REST 模式走 `/v1/images/{key}`，WS 模式走编辑器视口截图）
 - 凭据：工具参数 `token`、插件配置 `token` 或环境变量 `FIGMA_TOKEN` 三选一
 
 ## 安装
@@ -86,6 +88,47 @@ figma_read_node file_key=Zh9LpkjKgNrwuBITsD5d6g node_id=8049:4704 render=true sc
 - 只有 `render=true`（渲染 PNG）或 `refresh=true` 时才会产生新请求；
 - 缓存里找不到节点时会自动强制刷新一次再查找；
 - 整文件缓存可能较大（几十 MB），属正常；删掉 `figma_cache/<fileKey>.json` 即清除缓存。
+
+## WS 模式（零 REST API）
+
+`figma_read_node_ws` 完全不调用 Figma REST API：它通过 browser-harness/CDP 驱动你已登录
+Figma 的 Chrome，监听编辑器 WebSocket，捕获 Kiwi 二进制帧（zstd 压缩），再用仓库内
+vendored 解码器还原整棵场景图，最后按节点 id 提取子树生成报告。
+
+前置条件：
+
+- Chrome 已带 `--remote-debugging-port=9222` 启动，且已登录 Figma；
+- 本机装有 `browser-harness` CLI（默认 `~/.local/bin/browser-harness`）。
+
+用法：
+
+```
+figma_read_node_ws url=https://www.figma.com/design/<fileKey>/<name>?node-id=8049-4704
+```
+
+或：
+
+```
+figma_read_node_ws file_key=Zh9LpkjKgNrwuBITsD5d6g node_id=8049:4704 screenshot=true wait_seconds=18
+```
+
+参数：
+
+| 参数 | 必填 | 说明 |
+|---|---|---|
+| `url` | 二选一 | Figma 链接（含 node-id） |
+| `file_key` + `node_id` | 二选一 | 直接指定文件与节点 |
+| `screenshot` | 否 | 是否截取编辑器视口 PNG，默认 true |
+| `wait_seconds` | 否 | 等待 Figma 初始同步的秒数，默认 18 |
+| `browser_harness_path` | 否 | browser-harness CLI 路径 |
+| `output_dir` | 否 | 导出目录，默认 `~/Desktop/figma-exports/ws` |
+
+注意事项：
+
+- 每次调用会**新开一个 Figma 标签页**（约 20 秒），完成后不自动关闭；
+- 截图是编辑器**视口截图**，不是按节点裁切的干净导出（干净导出仍需 REST `/v1/images`）；
+- 解码器由一次捕获的 schema 生成，已验证跨会话稳定；若未来 Figma 协议变更导致解码失败，
+  可联系维护者重新生成 `vendor/figma-kiwi/figma_decoder.js`。
 
 ## 环境变量
 
