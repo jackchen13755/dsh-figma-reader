@@ -1,5 +1,5 @@
 var exports = exports || {};
-exports.ByteBuffer = exports.ByteBuffer || require("kiwi-schema").ByteBuffer;
+exports.ByteBuffer = exports.ByteBuffer || require("./kiwi-schema").ByteBuffer;
 exports["MessageType"] = {
   "0": "JOIN_START",
   "1": "NODE_CHANGES",
