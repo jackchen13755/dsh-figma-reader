@@ -2,9 +2,13 @@
  * @deepseek-ai/dsh-tool-figma-reader — 读取 Figma 设计稿节点。
  *
  * 把一个 Figma 设计稿节点（FRAME/组件）拉成三层产物：
- * 1. 节点原始 JSON（REST API `GET /v1/files/{key}/nodes`）
+ * 1. 节点原始 JSON（来自整文件缓存，避免反复消耗 REST 配额）
  * 2. 结构化 Markdown 报告（图层树、文本、字体、颜色、布局、按钮/输入框）
  * 3. 渲染 PNG（`GET /v1/images/{key}`，可选）
+ *
+ * 配额友好：默认首次读取某文件时用 `GET /v1/files/{key}` 拉整份文件并缓存到
+ * `<outputDir>/figma_cache/<fileKey>.json`；之后读取同文件的任何节点都直接走本地
+ * 缓存，不再调用 API。只有渲染 PNG 或 `refresh=true` 时才会产生新请求。
  *
  * 设计稿节点由 Figma REST API 读取，无需浏览器；凭据用 Personal Access Token
  * （配置项 token，或环境变量 FIGMA_TOKEN）。
@@ -12,7 +16,7 @@
 import type { Context } from 'cordis'
 import { defineTool } from '@deepseek-ai/dsh-tools'
 import z from 'schemastery'
-import { mkdir, writeFile } from 'node:fs/promises'
+import { mkdir, readFile, writeFile } from 'node:fs/promises'
 import { homedir } from 'node:os'
 import { join, resolve } from 'node:path'
 
@@ -95,6 +99,22 @@ interface FigmaNode {
   paddingTop?: number
   paddingBottom?: number
   componentId?: string
+}
+
+interface WholeFile {
+  name: string
+  lastModified?: string
+  document: FigmaNode
+}
+
+/** 在整文件文档树里按节点 id 深度优先查找。 */
+function findNode(root: FigmaNode, id: string): FigmaNode | null {
+  if (root.id === id) return root
+  for (const c of root.children ?? []) {
+    const hit = findNode(c, id)
+    if (hit) return hit
+  }
+  return null
 }
 
 function bboxText(n: FigmaNode): string {
@@ -218,7 +238,7 @@ export function apply(ctx: Context, config: Config = {}): void {
 
   ctx.effect(() => ctx.tools.register(defineTool({
     name: 'figma_read_node',
-    description: '读取 Figma 设计稿节点：解析图层/文本/样式，生成 Markdown 报告并可选渲染 PNG',
+    description: '读取 Figma 设计稿节点（整文件缓存，省 API 配额）：解析图层/文本/样式，生成 Markdown 报告并可选渲染 PNG',
     parameters: {
       url: { type: 'string', description: 'Figma 设计稿 URL（含 node-id）' },
       file_key: { type: 'string', description: 'Figma file key（传 url 时可不填）' },
@@ -227,36 +247,63 @@ export function apply(ctx: Context, config: Config = {}): void {
       render: { type: 'boolean', description: '是否渲染 PNG，默认 true' },
       scale: { type: 'number', description: 'PNG 缩放倍数，默认 2' },
       output_dir: { type: 'string', description: '导出目录，默认 ~/Desktop/figma-exports' },
+      refresh: { type: 'boolean', description: '强制重新拉取整文件并刷新缓存，默认 false' },
     },
     output: {
       schema: { type: 'string' },
       render: (_args: unknown, value: unknown) => [textBlock(String(value))],
     },
-    async execute(args: { url?: string; file_key?: string; node_id?: string; token?: string; render?: boolean; scale?: number; output_dir?: string }) {
+    async execute(args: { url?: string; file_key?: string; node_id?: string; token?: string; render?: boolean; scale?: number; output_dir?: string; refresh?: boolean }) {
       const tk = args.token || token
       if (!tk) throw new Error('缺少 Figma token：请在工具参数 token、插件配置 token 或环境变量 FIGMA_TOKEN 中提供')
       const { fileKey, nodeId } = resolveTarget(args.url, args.file_key, args.node_id)
       const outDir = resolve(args.output_dir || outputDir)
       await mkdir(outDir, { recursive: true })
+      const cacheDir = join(outDir, 'figma_cache')
+      const cacheFile = join(cacheDir, `${fileKey}.json`)
 
-      // 1) 节点 JSON
-      const data = await figmaGet<{ name: string; nodes: Record<string, { document: FigmaNode }> }>(
-        `/files/${encodeURIComponent(fileKey)}/nodes?ids=${encodeURIComponent(nodeId)}`,
-        tk,
-      )
-      const entry = data.nodes?.[nodeId]
-      if (!entry?.document) throw new Error(`节点 ${nodeId} 不存在或无权限`)
-      const doc = entry.document
+      // 1) 整文件数据：优先缓存，refresh=true 或缓存缺失时拉 API
+      const readCache = async (): Promise<WholeFile | null> => {
+        try {
+          return JSON.parse(await readFile(cacheFile, 'utf8')) as WholeFile
+        } catch {
+          return null
+        }
+      }
+      const fetchWhole = async (): Promise<WholeFile> => {
+        const data = await figmaGet<WholeFile>(`/files/${encodeURIComponent(fileKey)}`, tk)
+        await mkdir(cacheDir, { recursive: true })
+        await writeFile(cacheFile, JSON.stringify(data, null, 2), 'utf8')
+        return data
+      }
+
+      let data: WholeFile | null = null
+      let fromCache = false
+      if (!args.refresh) {
+        data = await readCache()
+        fromCache = data !== null
+      }
+      if (!data) data = await fetchWhole()
+
+      // 2) 定位节点；缓存里没有则强制刷新一次再找
+      let doc = findNode(data.document, nodeId)
+      if (!doc && fromCache) {
+        data = await fetchWhole()
+        fromCache = false
+        doc = findNode(data.document, nodeId)
+      }
+      if (!doc) throw new Error(`节点 ${nodeId} 不存在或无权限`)
+
       const base = `figma_${fileKey}_${nodeId.replace(':', '-')}`
       const jsonPath = join(outDir, `${base}.json`)
       const mdPath = join(outDir, `${base}.report.md`)
-      await writeFile(jsonPath, JSON.stringify(data, null, 2), 'utf8')
+      await writeFile(jsonPath, JSON.stringify({ fileKey, fileName: data.name, nodeId, node: doc }, null, 2), 'utf8')
 
-      // 2) Markdown 报告
+      // 3) Markdown 报告
       const report = buildReport(doc)
       await writeFile(mdPath, report, 'utf8')
 
-      // 3) 渲染 PNG
+      // 4) 渲染 PNG（独立请求，按需调用）
       let pngPath: string | null = null
       if (args.render ?? renderDefault) {
         const img = await figmaGet<{ images: Record<string, string> }>(
@@ -277,6 +324,8 @@ export function apply(ctx: Context, config: Config = {}): void {
         `✅ 已读取 Figma 节点：${doc.name}`,
         `- 文件：${data.name}（file key ${fileKey}）`,
         `- 节点：${nodeId}（${doc.type}，${doc.absoluteBoundingBox ? `${Math.round(doc.absoluteBoundingBox.width)}×${Math.round(doc.absoluteBoundingBox.height)}` : '尺寸未知'}）`,
+        `- 数据来源：${fromCache ? '整文件缓存' : 'Figma API 整文件（已写入缓存）'}`,
+        `- 缓存文件：${cacheFile}`,
         `- 报告：${mdPath}`,
         `- JSON：${jsonPath}`,
         ...(pngPath ? [`- PNG：${pngPath}`] : []),
