@@ -42,7 +42,10 @@ const manifestPath = join(dir, 'last_capture.json')
 if (!dataPath && existsSync(manifestPath)) {
   try {
     manifest = JSON.parse(readFileSync(manifestPath, 'utf8'))
-    if (manifest.dataFile) dataPath = join(dir, manifest.dataFile)
+    // 清单若指向 <1KB 的小帧（非场景图），忽略并回退到目录里最大数据帧
+    if (manifest.dataFile && (manifest.dataSize || 0) >= 1024) {
+      dataPath = join(dir, manifest.dataFile)
+    }
   } catch (e) {
     console.error(`读取 ${manifestPath} 失败：${e.message}`)
   }
