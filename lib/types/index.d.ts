@@ -30,6 +30,8 @@ export interface Config {
     browserHarnessPath?: string;
     /** WS 模式等待 Figma 初始同步的秒数，默认 18。 */
     wsWaitSeconds?: number;
+    /** 浏览器下载帧目录（扩展保存的 ~/Downloads/figma_ws），默认即该目录。 */
+    localCaptureDir?: string;
 }
 export declare const Config: z<Schemastery.ObjectS<{
     token: z<string, string>;
@@ -38,6 +40,7 @@ export declare const Config: z<Schemastery.ObjectS<{
     render: z<boolean, boolean>;
     browserHarnessPath: z<string, string>;
     wsWaitSeconds: z<number, number>;
+    localCaptureDir: z<string, string>;
 }>, Schemastery.ObjectT<{
     token: z<string, string>;
     outputDir: z<string, string>;
@@ -45,5 +48,6 @@ export declare const Config: z<Schemastery.ObjectS<{
     render: z<boolean, boolean>;
     browserHarnessPath: z<string, string>;
     wsWaitSeconds: z<number, number>;
+    localCaptureDir: z<string, string>;
 }>>;
 export declare function apply(ctx: Context, config?: Config): void;

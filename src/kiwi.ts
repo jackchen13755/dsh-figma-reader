@@ -68,7 +68,8 @@ export function decodeFrameAndBuildReport(
   fileKey: string,
   nodeId: string,
   outDir: string,
-): { jsonPath: string; mdPath: string; nodeCount: number; messageType: string } {
+  source = 'Figma WS Kiwi 二进制（零 REST API）',
+): { jsonPath: string; mdPath: string; nodeCount: number; messageType: string; source: string } {
   const compressed = readFileSync(dataFramePath)
   const bytes = new Uint8Array(zstdDecompressSync(compressed))
   const require = createRequire(import.meta.url)
@@ -121,7 +122,7 @@ export function decodeFrameAndBuildReport(
     )
   }
   md.push('')
-  md.push('> 数据来源：Figma WS Kiwi 二进制（零 REST API）')
+  md.push(`> 数据来源：${source}`)
   md.push('')
 
   // 文本
@@ -211,5 +212,5 @@ export function decodeFrameAndBuildReport(
     'utf8',
   )
   writeFileSync(mdPath, md.join('\n'), 'utf8')
-  return { jsonPath, mdPath, nodeCount: subtree.length, messageType: String(msg.type ?? '') }
+  return { jsonPath, mdPath, nodeCount: subtree.length, messageType: String(msg.type ?? ''), source }
 }

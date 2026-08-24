@@ -16,7 +16,7 @@
 import type { Context } from 'cordis'
 import { defineTool } from '@deepseek-ai/dsh-tools'
 import z from 'schemastery'
-import { mkdir, readFile, writeFile } from 'node:fs/promises'
+import { mkdir, readFile, readdir, stat, writeFile } from 'node:fs/promises'
 import { homedir } from 'node:os'
 import { join, resolve } from 'node:path'
 import { runCapture } from './capture.js'
@@ -38,6 +38,8 @@ export interface Config {
   browserHarnessPath?: string
   /** WS 模式等待 Figma 初始同步的秒数，默认 18。 */
   wsWaitSeconds?: number
+  /** 浏览器下载帧目录（扩展保存的 ~/Downloads/figma_ws），默认即该目录。 */
+  localCaptureDir?: string
 }
 
 export const Config = z.object({
@@ -47,6 +49,7 @@ export const Config = z.object({
   render: z.boolean().default(true),
   browserHarnessPath: z.string().default(''),
   wsWaitSeconds: z.number().default(18),
+  localCaptureDir: z.string().default(''),
 })
 
 const API = 'https://api.figma.com/v1'
@@ -68,6 +71,70 @@ function resolveTarget(url?: string, fileKey?: string, nodeId?: string): { fileK
   if (!node) throw new Error('URL 缺少 node-id，请直接传 node_id')
   node = node.replace(/-(\d+)$/i, (_s, d: string) => ':' + d)
   return { fileKey: key, nodeId: node }
+}
+
+interface LocalCapture {
+  dataPath: string
+  schemaPath: string | null
+  manifest: Record<string, unknown> | null
+}
+
+/** 从 Figma URL 中解析 file key。 */
+function fileKeyFromUrl(url: string): string | null {
+  const m = /figma\.com\/(?:design|file|proto)\/([^/?#]+)/i.exec(url)
+  return m ? m[1] : null
+}
+
+async function readJsonFile(path: string): Promise<Record<string, unknown> | null> {
+  try {
+    return JSON.parse(await readFile(path, 'utf8')) as Record<string, unknown>
+  } catch {
+    return null
+  }
+}
+
+/**
+ * 从浏览器扩展静默捕获的下载目录中，查找与目标 fileKey 匹配的最新 Kiwi 数据帧。
+ * 返回 null 表示目录里没有可用帧（或清单属于另一个文件）。
+ */
+async function findLocalCapture(dir: string, fileKey: string): Promise<LocalCapture | null> {
+  const manifest = await readJsonFile(join(dir, 'last_capture.json'))
+  if (manifest) {
+    const manifestKey = fileKeyFromUrl(String(manifest.url ?? ''))
+    const dataFile = manifest.dataFile ? String(manifest.dataFile) : ''
+    const dataSize = Number(manifest.dataSize ?? 0)
+    // 清单属于另一个文件时不要串用错误的帧
+    if (manifestKey && manifestKey !== fileKey) return null
+    // 清单指向同文件且是有效大帧（非 <1KB 小帧）时直接使用
+    if (dataFile && dataSize >= 1024) {
+      const p = join(dir, dataFile)
+      try {
+        await stat(p)
+        return {
+          dataPath: p,
+          schemaPath: manifest.schemaFile ? join(dir, String(manifest.schemaFile)) : null,
+          manifest,
+        }
+      } catch {
+        // 帧文件缺失，继续走退路
+      }
+    }
+  }
+  // 退路：取目录里最新的 frame_0001_recv_*.bin
+  const candidates: Array<{ f: string; m: number }> = []
+  try {
+    for (const f of await readdir(dir)) {
+      if (/^frame_0001_recv_\d+b\.bin$/.test(f)) {
+        const st = await stat(join(dir, f))
+        candidates.push({ f, m: st.mtimeMs })
+      }
+    }
+  } catch {
+    return null
+  }
+  candidates.sort((a, b) => b.m - a.m)
+  if (!candidates.length) return null
+  return { dataPath: join(dir, candidates[0].f), schemaPath: null, manifest: null }
 }
 
 async function figmaGet<T>(path: string, token: string): Promise<T> {
@@ -243,10 +310,11 @@ export function apply(ctx: Context, config: Config = {}): void {
   const outputDir = resolve(config.outputDir || join(homedir(), 'Desktop', 'figma-exports'))
   const scale = config.scale ?? 2
   const renderDefault = config.render ?? true
+  const localCaptureDir = resolve(config.localCaptureDir || join(homedir(), 'Downloads', 'figma_ws'))
 
   ctx.effect(() => ctx.tools.register(defineTool({
     name: 'figma_read_node',
-    description: '读取 Figma 设计稿节点（整文件缓存，省 API 配额）：解析图层/文本/样式，生成 Markdown 报告并可选渲染 PNG',
+    description: '读取 Figma 设计稿节点：优先使用浏览器下载帧，缺失时回退 Figma REST API（整文件缓存，省 API 配额）；解析图层/文本/样式并可选渲染 PNG',
     parameters: {
       url: { type: 'string', description: 'Figma 设计稿 URL（含 node-id）' },
       file_key: { type: 'string', description: 'Figma file key（传 url 时可不填）' },
@@ -256,17 +324,43 @@ export function apply(ctx: Context, config: Config = {}): void {
       scale: { type: 'number', description: 'PNG 缩放倍数，默认 2' },
       output_dir: { type: 'string', description: '导出目录，默认 ~/Desktop/figma-exports' },
       refresh: { type: 'boolean', description: '强制重新拉取整文件并刷新缓存，默认 false' },
+      local_capture_dir: { type: 'string', description: '浏览器下载帧目录，默认 ~/Downloads/figma_ws' },
     },
     output: {
       schema: { type: 'string' },
       render: (_args: unknown, value: unknown) => [textBlock(String(value))],
     },
-    async execute(args: { url?: string; file_key?: string; node_id?: string; token?: string; render?: boolean; scale?: number; output_dir?: string; refresh?: boolean }) {
-      const tk = args.token || token
-      if (!tk) throw new Error('缺少 Figma token：请在工具参数 token、插件配置 token 或环境变量 FIGMA_TOKEN 中提供')
+    async execute(args: { url?: string; file_key?: string; node_id?: string; token?: string; render?: boolean; scale?: number; output_dir?: string; refresh?: boolean; local_capture_dir?: string }) {
       const { fileKey, nodeId } = resolveTarget(args.url, args.file_key, args.node_id)
       const outDir = resolve(args.output_dir || outputDir)
       await mkdir(outDir, { recursive: true })
+      const localDir = resolve(args.local_capture_dir || localCaptureDir)
+
+      // 0) 优先使用浏览器下载帧
+      const local = await findLocalCapture(localDir, fileKey)
+      if (local) {
+        try {
+          const dec = decodeFrameAndBuildReport(local.dataPath, fileKey, nodeId, outDir, '浏览器下载帧（本地文件）')
+          const lines = [
+            `✅ 已通过浏览器下载文件读取 Figma 节点：${nodeId}`,
+            `- 数据来源：浏览器下载帧（${local.dataPath}）`,
+            `- 消息类型：${dec.messageType}，子树节点数：${dec.nodeCount}`,
+            `- 报告：${dec.mdPath}`,
+            `- JSON：${dec.jsonPath}`,
+            ...((args.render ?? renderDefault) ? ['- PNG：本地文件模式不提供 PNG；如需 PNG 请用 API 模式'] : []),
+            '',
+            '--- 报告摘要 ---',
+            '',
+            await readFile(dec.mdPath, 'utf8'),
+          ]
+          return lines.join('\n')
+        } catch {
+          // 下载帧缺失/无法解码时回退到 API 模式
+        }
+      }
+
+      const tk = args.token || token
+      if (!tk) throw new Error('缺少 Figma token：请在工具参数 token、插件配置 token 或环境变量 FIGMA_TOKEN 中提供')
       const cacheDir = join(outDir, 'figma_cache')
       const cacheFile = join(cacheDir, `${fileKey}.json`)
 
@@ -349,7 +443,7 @@ export function apply(ctx: Context, config: Config = {}): void {
   // ── WS 模式：零 REST API，靠浏览器会话捕获 Kiwi 二进制帧 ──────────────────
   ctx.effect(() => ctx.tools.register(defineTool({
     name: 'figma_read_node_ws',
-    description: '通过浏览器会话（零 REST API）读取 Figma 节点：CDP 捕获 Kiwi 二进制帧并解码生成报告',
+    description: '读取 Figma 节点（零 REST API）：优先使用浏览器下载帧，缺失时回退浏览器会话 CDP 捕获 Kiwi 二进制帧并解码生成报告',
     parameters: {
       url: { type: 'string', description: 'Figma 设计稿 URL（含 node-id）' },
       file_key: { type: 'string', description: 'Figma file key（传 url 时可不填）' },
@@ -358,15 +452,41 @@ export function apply(ctx: Context, config: Config = {}): void {
       screenshot: { type: 'boolean', description: '是否顺带截取编辑器视口 PNG，默认 true' },
       wait_seconds: { type: 'number', description: '等待 Figma 初始同步秒数，默认 18' },
       browser_harness_path: { type: 'string', description: 'browser-harness CLI 路径，缺省用配置/默认路径' },
+      local_capture_dir: { type: 'string', description: '浏览器下载帧目录，默认 ~/Downloads/figma_ws' },
     },
     output: {
       schema: { type: 'string' },
       render: (_args: unknown, value: unknown) => [textBlock(String(value))],
     },
-    async execute(args: { url?: string; file_key?: string; node_id?: string; output_dir?: string; screenshot?: boolean; wait_seconds?: number; browser_harness_path?: string }) {
+    async execute(args: { url?: string; file_key?: string; node_id?: string; output_dir?: string; screenshot?: boolean; wait_seconds?: number; browser_harness_path?: string; local_capture_dir?: string }) {
       const { fileKey, nodeId } = resolveTarget(args.url, args.file_key, args.node_id)
       const outDir = resolve(args.output_dir || config.outputDir || join(homedir(), 'Desktop', 'figma-exports', 'ws'))
       await mkdir(outDir, { recursive: true })
+      const localDir = resolve(args.local_capture_dir || config.localCaptureDir || join(homedir(), 'Downloads', 'figma_ws'))
+
+      // 0) 优先使用浏览器下载帧
+      const local = await findLocalCapture(localDir, fileKey)
+      if (local) {
+        try {
+          const dec = decodeFrameAndBuildReport(local.dataPath, fileKey, nodeId, outDir, '浏览器下载帧（本地文件）')
+          const lines = [
+            `✅ 已通过浏览器下载文件读取 Figma 节点：${nodeId}`,
+            `- 数据来源：浏览器下载帧（${local.dataPath}）`,
+            `- 消息类型：${dec.messageType}，子树节点数：${dec.nodeCount}`,
+            `- 报告：${dec.mdPath}`,
+            `- JSON：${dec.jsonPath}`,
+            ...((args.screenshot ?? true) ? ['- 视口截图：本地文件模式不提供截图；如需截图请用连接捕获模式'] : []),
+            '',
+            '--- 报告摘要 ---',
+            '',
+            await readFile(dec.mdPath, 'utf8'),
+          ]
+          return lines.join('\n')
+        } catch {
+          // 下载帧缺失/无法解码时回退到连接捕获模式
+        }
+      }
+
       const captureDir = join(outDir, 'ws_capture')
       const figmaUrl = args.url || `https://www.figma.com/file/${encodeURIComponent(fileKey)}?node-id=${encodeURIComponent(nodeId)}`
       const cap = await runCapture({
@@ -378,7 +498,7 @@ export function apply(ctx: Context, config: Config = {}): void {
         screenshot: args.screenshot ?? true,
         browserHarnessPath: args.browser_harness_path || config.browserHarnessPath || undefined,
       })
-      const dec = decodeFrameAndBuildReport(cap.dataPath, fileKey, nodeId, outDir)
+      const dec = decodeFrameAndBuildReport(cap.dataPath, fileKey, nodeId, outDir, '浏览器会话捕获（CDP）')
       const lines = [
         `✅ 已通过 Figma WS（零 REST API）读取节点：${nodeId}`,
         `- 数据来源：浏览器会话 Kiwi 二进制帧（browser-harness/CDP）`,
