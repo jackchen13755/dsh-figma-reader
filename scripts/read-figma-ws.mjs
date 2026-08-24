@@ -42,6 +42,13 @@ const manifestPath = join(dir, 'last_capture.json')
 if (!dataPath && existsSync(manifestPath)) {
   try {
     manifest = JSON.parse(readFileSync(manifestPath, 'utf8'))
+    // 防止串用另一个文件捕获的帧：仅当清单未记录文件或与请求 fileKey 一致时使用
+    const murl = String(manifest.url ?? '')
+    const mk = (murl.match(/figma\.com\/(?:design|file|proto)\/([^/?#]+)/i) || [])[1]
+    if (mk && mk !== fileKey) {
+      console.error(`清单属于另一个文件（${mk}），与请求文件 ${fileKey} 不符；请先打开目标 Figma 页并重新下载帧`)
+      process.exit(1)
+    }
     // 清单若指向 <1KB 的小帧（非场景图），忽略并回退到目录里最大数据帧
     if (manifest.dataFile && (manifest.dataSize || 0) >= 1024) {
       dataPath = join(dir, manifest.dataFile)
@@ -69,5 +76,5 @@ if (!existsSync(dataPath)) {
   process.exit(1)
 }
 
-const result = decodeFrameAndBuildReport(dataPath, fileKey, nodeId, out)
+const result = decodeFrameAndBuildReport(dataPath, fileKey, nodeId, out, '浏览器下载帧（本地文件）')
 console.log(JSON.stringify({ ...result, sourceDir: dir, manifest }, null, 2))
