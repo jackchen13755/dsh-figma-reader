@@ -13,7 +13,7 @@
  * 设计稿节点由 Figma REST API 读取，无需浏览器；凭据用 Personal Access Token
  * （配置项 token，或环境变量 FIGMA_TOKEN）。
  */
-import type { Context } from 'cordis'
+import type { Context } from '@deepseek-ai/cordis'
 import { defineTool } from '@deepseek-ai/dsh-tools'
 import z from 'schemastery'
 import { mkdir, readFile, readdir, stat, writeFile } from 'node:fs/promises'
